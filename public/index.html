@@ -2,10 +2,10 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content">
     <title>Responsive Node.js Chat</title>
     <style>
-          /* Base reset and setup */
+          /* Base reset */
       * {
           box-sizing: border-box;
           margin: 0;
@@ -13,33 +13,34 @@
           font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       }
 
-      /* 1. Ensure the viewport is locked and doesn't scroll globally */
+      /* Force the body to stay firmly fixed within the screen boundaries */
       html, body {
-          height: 100dvh;
-          height: 100vh;
-          width: 100vw;
+          position: fixed;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          width: 100%;
+          height: 100%;
           overflow: hidden;
           background-color: #f0f2f5;
       }
 
-      body {
-          display: flex;
-          justify-content: center;
-          align-items: center;
-      }
-
-      /* 2. Mobile First: Full screen by default */
+      /* MOBILE FIRST: Pin the container exactly to the edges of the visible screen */
       .chat-container {
+          position: absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
           display: flex;
           flex-direction: column;
           background: #ffffff;
           width: 100%;
-          height: 100dvh; /* Adapts dynamically to mobile toolbars */
           height: 100%;
-          box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
       }
 
-      /* Chat Header - Always static at the top */
+      /* Chat Header - Locked at the top */
       .chat-header {
           background-color: #075e54;
           color: white;
@@ -49,7 +50,7 @@
           display: flex;
           align-items: center;
           gap: 10px;
-          flex-shrink: 0; /* Prevents the header from squishing */
+          flex-shrink: 0;
       }
 
       .chat-header .status-dot {
@@ -59,11 +60,12 @@
           border-radius: 50%;
       }
 
-      /* 3. The Secret Sauce: Only this container is allowed to scroll */
+      /* Message Area - Independent scroll layer */
       .chat-messages {
           flex: 1;
           padding: 20px;
-          overflow-y: auto; /* Adds scrollbar right here when messages overflow */
+          overflow-y: auto;
+          -webkit-overflow-scrolling: touch; /* Smooth physics scrolling for iOS */
           background-color: #efeae2;
           display: flex;
           flex-direction: column;
@@ -93,14 +95,15 @@
           box-shadow: 0 1px 1px rgba(0,0,0,0.05);
       }
 
-      /* Input Area Footer - Always static at the bottom */
+      /* Input Area Footer - Locked at the absolute bottom */
       .chat-input-area {
           background-color: #f0f2f5;
           padding: 12px 15px;
           display: flex;
           gap: 10px;
           align-items: center;
-          flex-shrink: 0; /* Prevents the input from squishing */
+          flex-shrink: 0;
+          border-top: 1px solid #e1e6eb;
       }
 
       .chat-input-area input {
@@ -109,7 +112,7 @@
           border: 1px solid #e1e6eb;
           border-radius: 20px;
           outline: none;
-          font-size: 1rem; /* 1rem or 16px prevents iOS from zooming in automatically on focus */
+          font-size: 16px; /* 16px strictly prevents iOS auto-zoom behavior */
       }
 
       .chat-input-area button {
@@ -123,28 +126,42 @@
           font-size: 0.95rem;
       }
 
-      /* --- Responsive Media Queries --- */
+      /* --- Responsive Media Queries: Override absolute fullscreen on larger devices --- */
 
       /* Tablets (iPads) */
       @media (min-width: 481px) and (max-width: 1024px) {
+          body {
+              display: flex;
+              justify-content: center;
+              align-items: center;
+          }
           .chat-container {
+              position: relative;
               width: 80%;
               height: 80vh;
               border-radius: 12px;
               overflow: hidden;
+              box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
           }
       }
 
       /* Desktop Computers */
       @media (min-width: 1025px) {
+          body {
+              display: flex;
+              justify-content: center;
+              align-items: center;
+          }
           .chat-container {
+              position: relative;
               width: 450px;
               height: 700px;
               border-radius: 12px;
               overflow: hidden;
+              box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
           }
       }
-</style>
+    </style>
 </head>
 <body>
 

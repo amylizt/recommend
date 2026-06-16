@@ -2,8 +2,7 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const { GoogleGenAI } = require('@google/genai');
-const sqlite3 = require('sqlite3');
-const { open } = require('sqlite');
+const { Pool } = require('pg'); // Switched to pg Pool
 const { Resend } = require('resend');
 
 const app = express();
@@ -16,36 +15,42 @@ const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 // Initialize Resend Client using your environmental configuration key
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-// Global DB Connection reference
-let db;
+// Global DB Connection Pool
+const db = new Pool({
+    host: process.env.DB_HOST || 'localhost',
+    user: process.env.DB_USER || 'postgres',
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME || 'snookbook',
+    port: parseInt(process.env.DB_PORT || '5432', 10),
+});
 
-// Database Initialization
+// Database Initialization (Table setup)
 (async () => {
     try {
-        db = await open({
-            filename: path.join(__dirname, 'database.db'),
-            driver: sqlite3.Database
-        });
+        // Test connection
+        await db.query('SELECT NOW()');
         
-        await db.exec(`
+        // Create tables using standard Postgres syntax
+        await db.query(`
             CREATE TABLE IF NOT EXISTS users (
                 id TEXT PRIMARY KEY,
                 email TEXT UNIQUE NOT NULL,
                 auth_provider TEXT DEFAULT 'local',
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
+        `);
 
+        await db.query(`
             CREATE TABLE IF NOT EXISTS recommendations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id TEXT NOT NULL,
+                id SERIAL PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id),
                 book_title TEXT NOT NULL,
                 author TEXT NOT NULL,
                 status TEXT DEFAULT 'suggested',
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(user_id) REFERENCES users(id)
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         `);
-        console.log("💾 SQLite Database initialized cleanly via app layer.");
+        console.log("💾 PostgreSQL Database initialized cleanly via pure JS app layer.");
     } catch (error) {
         console.error("❌ Database initialization failed:", error.message);
     }
@@ -96,7 +101,6 @@ app.post('/api/chat', async (req, res) => {
         return res.status(400).json({ error: "A unique sessionId is required." });
     }
 
-    // Initialize history if it's a completely fresh window session
     if (!chatSessions[sessionId]) {
         console.log(`🆕 Starting fluid AI discovery session: ${sessionId}`);
         chatSessions[sessionId] = { 
@@ -107,7 +111,7 @@ app.post('/api/chat', async (req, res) => {
             authCode: null,
             isAuthenticated: false,
             userId: null,
-            excludedBooks: [] // Tracks historical recommendations to prevent duplicates
+            excludedBooks: []
         };
     }
 
@@ -121,21 +125,22 @@ app.post('/api/chat', async (req, res) => {
             session.isAuthenticated = true;
             console.log(`🔒 Session ${sessionId} authenticated successfully for user: ${session.authEmail}`);
             
-            // Fetch past recommendations from the database to populate our exclusion blacklist
             try {
-                await db.run(
-                    `INSERT INTO users (id, email) VALUES (?, ?) ON CONFLICT(email) DO NOTHING`,
+                // Upsert logic for PostgreSQL using ON CONFLICT DO NOTHING
+                await db.query(
+                    `INSERT INTO users (id, email) VALUES ($1, $2) ON CONFLICT(email) DO NOTHING`,
                     [session.userId, session.authEmail]
                 );
 
-                const pastBooks = await db.all(
-                    `SELECT book_title, author FROM recommendations WHERE user_id = ?`,
+                // Fetch past recommendations from Postgres
+                const result = await db.query(
+                    `SELECT book_title, author FROM recommendations WHERE user_id = $1`,
                     [session.userId]
                 );
                 
-                if (pastBooks && pastBooks.length > 0) {
-                    session.excludedBooks = pastBooks.map(b => `"${b.book_title}" by ${b.author}`);
-                    console.log(`📚 Loaded ${session.excludedBooks.length} historical book exclusions for this session.`);
+                if (result.rows && result.rows.length > 0) {
+                    session.excludedBooks = result.rows.map(b => `"${b.book_title}" by ${b.author}`);
+                    console.log(`📚 Loaded ${session.excludedBooks.length} historical book exclusions.`);
                 }
             } catch (dbErr) {
                 console.error("Database user setup error:", dbErr.message);
@@ -156,14 +161,12 @@ app.post('/api/chat', async (req, res) => {
         }
     }
 
-    // Capture standard conversation turn if it wasn't intercepted
     const justVerified = session.authEmail && session.isAuthenticated && session.history[session.history.length - 1].parts[0].text.includes('[SYSTEM:');
 
     if (!justVerified && session.history[session.history.length - 1].role !== "user") {
         session.history.push({ role: "user", parts: [{ text: message }] });
     }
 
-    // Basic regex check for email input
     const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
     const detectedEmail = message.match(emailRegex);
 
@@ -172,10 +175,10 @@ app.post('/api/chat', async (req, res) => {
         session.authEmail = emailTarget;
         
         try {
-            const existingUser = await db.get(`SELECT id FROM users WHERE LOWER(email) = ?`, [emailTarget]);
-            if (existingUser) {
-                console.log(`🔍 Existing user match found in DB. Reusing ID: ${existingUser.id}`);
-                session.userId = existingUser.id;
+            const result = await db.query(`SELECT id FROM users WHERE LOWER(email) = $1`, [emailTarget]);
+            if (result.rows.length > 0) {
+                console.log(`🔍 Existing user match found in DB. Reusing ID: ${result.rows[0].id}`);
+                session.userId = result.rows[0].id;
             } else {
                 session.userId = `usr_${Date.now()}`;
                 console.log(`🆕 No user found. Pre-generating new ID: ${session.userId}`);
@@ -190,12 +193,11 @@ app.post('/api/chat', async (req, res) => {
         console.log(`⚡ Code generated locally for session console log tracking: [ ${generatedPin} ]`);
         sendVerificationEmail(session.authEmail, generatedPin);
     }
-// Dynamic system instructions
+
     const dynamicBlacklist = session.excludedBooks && session.excludedBooks.length > 0 
         ? `CRITICAL EXCLUSIONS: You have already recommended the following books to this user in the past: ${session.excludedBooks.join(', ')}. NEVER suggest these books or their direct sequels again. Focus on fresh alternative content.`
         : ``;
 
-    // Change the onboarding rule based on the real-time session state
     const accountLogicRule = session.isAuthenticated
         ? `- The user is ALREADY SECURELY AUTHENTICATED via email. Do NOT show, mention, or print the onboarding greeting line. Do NOT ask them to sign in or create an account under any circumstances. Immediately treat them as a logged-in user and ask about their book tastes.`
         : `- First greeting: If the user is unauthenticated and just says hi, you MUST reply with this exact sentence: "If you want to sign in or create an account let's start with your email address. Otherwise, we can skip that for now—what are some of your favorite books or authors?"`;
@@ -226,7 +228,6 @@ Evaluate the state:
 - If all context is gathered, return a raw valid JSON array containing exactly 3 book objects. Each object must have keys: "title", "author", and "reason". Do not wrap your response in markdown formatting or tags.
 `;
 
-    // --- Retry Configuration Mechanism ---
     const maxRetries = 3;
     let currentDelay = 1500;
     let response;
@@ -236,7 +237,7 @@ Evaluate the state:
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
             response = await ai.models.generateContent({
-                model: "	gemini-3.1-flash-lite", 
+                model: "gemini-3.1-flash-lite", 
                 contents: session.history,
                 config: {
                     systemInstruction: discoverySystemInstruction,
@@ -270,7 +271,6 @@ Evaluate the state:
                 return { originalTitle: book.title, cleanTitle, author: book.author, reason: book.reason };
             });
 
-            // --- Optimized Open Library Cover Fetch ---
             const enrichedBooks = await Promise.all(cleanedBooks.map(async (book) => {
                 let coverUrl = "https://via.placeholder.com/120x180?text=No+Cover";
                 try {
@@ -296,8 +296,6 @@ Evaluate the state:
                 };
             }));
 
-            // FIX: Instead of wiping the session completely, preserve auth state 
-            // and clear out text logs so they can look for more books securely.
             const savedEmail = session.authEmail;
             const savedUserId = session.userId;
             const savedExclusions = [...session.excludedBooks, ...cleanedBooks.map(b => `"${b.originalTitle}" by ${b.author}`)];
@@ -339,27 +337,39 @@ app.post('/api/auth/register-and-save', async (req, res) => {
 
     try {
         let userId;
-        const userRow = await db.get(`SELECT id FROM users WHERE LOWER(email) = ?`, [cleanEmail]);
+        const userRow = await db.query(`SELECT id FROM users WHERE LOWER(email) = $1`, [cleanEmail]);
         
-        if (userRow) {
-            userId = userRow.id;
+        if (userRow.rows.length > 0) {
+            userId = userRow.rows[0].id;
             console.log(`💾 Saving recommendations to existing user record ID: ${userId}`);
         } else {
             userId = `usr_${Date.now()}`;
-            await db.run(
-                `INSERT INTO users (id, email, auth_provider) VALUES (?, ?, ?)`,
+            await db.query(
+                `INSERT INTO users (id, email, auth_provider) VALUES ($1, $2, $3)`,
                 [userId, cleanEmail, authProvider || 'email_code']
             );
             console.log(`💾 Created a fresh user record (${userId}).`);
         }
 
+        // Batch transactional insert for recommendations using Postgres parameters
         if (initialBooks && Array.isArray(initialBooks)) {
-            const stmt = await db.prepare(`INSERT INTO recommendations (user_id, book_title, author) VALUES (?, ?, ?)`);
-            for (const book of initialBooks) {
-                await stmt.run(userId, book.title, book.author);
+            const client = await db.connect();
+            try {
+                await client.query('BEGIN');
+                for (const book of initialBooks) {
+                    await client.query(
+                        `INSERT INTO recommendations (user_id, book_title, author) VALUES ($1, $2, $3)`,
+                        [userId, book.title, book.author]
+                    );
+                }
+                await client.query('COMMIT');
+                console.log(`📊 Successfully stored ${initialBooks.length} book entries via Postgres transaction.`);
+            } catch (txErr) {
+                await client.query('ROLLBACK');
+                throw txErr;
+            } finally {
+                client.release();
             }
-            await stmt.finalize();
-            console.log(`📊 Successfully stored ${initialBooks.length} book entries for user tracking.`);
         }
 
         res.json({ success: true, userId, message: "Reading data synced cleanly to database profile." });

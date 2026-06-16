@@ -11,6 +11,16 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "express": "^5.2.1"
+    "@google/genai": "^2.8.0",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "fetch": "^1.1.0",
+    "google-auth-library": "^10.7.0",
+    "node": "^26.3.0",
+    "nodemailer": "^9.0.0",
+    "playwright": "^1.61.0",
+    "resend": "^6.12.4",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^6.0.1"
   }
 }

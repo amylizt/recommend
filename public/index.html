@@ -168,11 +168,11 @@
     <div class="chat-container">
         <div class="chat-header">
             <div class="status-dot"></div>
-            <span>Node Latin AI</span>
+            <span>My Snook Book</span>
         </div>
         
         <div class="chat-messages" id="chatMessages">
-            <div class="message ai">Salvete! Ask me anything, and I shall answer in Latin.</div>
+            <div class="message ai">Say hello and lets discuss books!.</div>
         </div>
 
         <div class="chat-input-area">
@@ -180,11 +180,17 @@
             <button id="sendBtn">Send</button>
         </div>
     </div>
-
     <script>
         const chatMessages = document.getElementById('chatMessages');
         const userInput = document.getElementById('userInput');
         const sendBtn = document.getElementById('sendBtn');
+
+        let uniqueSessionId = localStorage.getItem('chat_session_id');
+
+        if (!uniqueSessionId) {
+            uniqueSessionId = 'sess_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+            localStorage.setItem('chat_session_id', uniqueSessionId);
+        }
 
         function appendMessage(text, sender) {
             const msgDiv = document.createElement('div');
@@ -194,29 +200,156 @@
             chatMessages.scrollTop = chatMessages.scrollHeight;
         }
 
+        // Dedicated renderer to inject full functional visual layout blocks directly into the stream 
+// Dedicated renderer to inject the updated single-link Google search cards
+        function appendBookRecommendations(booksArray) {
+            const wrapper = document.createElement('div');
+            wrapper.style.display = 'flex';
+            wrapper.style.flexDirection = 'column';
+            wrapper.style.gap = '16px';
+            wrapper.style.margin = '12px 0';
+            wrapper.style.width = '100%';
+
+            booksArray.forEach(book => {
+                const card = document.createElement('div');
+                card.style.display = 'flex';
+                card.style.gap = '14px';
+                card.style.background = '#ffffff';
+                card.style.padding = '12px';
+                card.style.borderRadius = '8px';
+                card.style.border = '1px solid #eef0f2';
+                card.style.boxShadow = '0 2px 5px rgba(0,0,0,0.05)';
+
+                // Visual Cover image asset
+                const img = document.createElement('img');
+                img.src = book.imageUrl;
+                img.style.width = '85px';
+                img.style.height = '125px';
+                img.style.objectFit = 'cover';
+                img.style.borderRadius = '4px';
+                img.style.border = '1px solid #e2e8f0';
+
+                // Core details column
+                const infoCol = document.createElement('div');
+                infoCol.style.display = 'flex';
+                infoCol.style.flexDirection = 'column';
+                infoCol.style.flex = '1';
+
+                const title = document.createElement('div');
+                title.innerText = book.title;
+                title.style.fontWeight = 'bold';
+                title.style.fontSize = '0.95rem';
+                title.style.color = '#111';
+
+                const author = document.createElement('div');
+                author.innerText = `by ${book.author}`;
+                author.style.color = '#666';
+                author.style.fontSize = '0.85rem';
+                author.style.margin = '2px 0 6px 0';
+
+                const reason = document.createElement('div');
+                reason.innerText = book.reason;
+                reason.style.fontSize = '0.85rem';
+                reason.style.color = '#444';
+                reason.style.marginBottom = '12px';
+
+                // Action Bar supporting the high-intent Google search lookup
+                const btnStrip = document.createElement('div');
+                btnStrip.style.display = 'flex';
+                btnStrip.style.gap = '8px';
+
+                const makeBtn = (url, label, bgColor) => {
+                    const btn = document.createElement('a');
+                    btn.href = url;
+                    btn.target = '_blank';
+                    btn.innerText = label;
+                    btn.style.textDecoration = 'none';
+                    btn.style.fontSize = '0.75rem';
+                    btn.style.fontWeight = 'bold';
+                    btn.style.padding = '6px 12px';
+                    btn.style.borderRadius = '4px';
+                    btn.style.color = '#fff';
+                    btn.style.backgroundColor = bgColor;
+                    return btn;
+                };
+
+                // Map button directly onto the Google Search payload option
+                const googleBtn = makeBtn(book.googleUrl, 'Find on Amazon & B&N', '#4285F4');
+                btnStrip.appendChild(googleBtn);
+
+                infoCol.appendChild(title);
+                infoCol.appendChild(author);
+                infoCol.appendChild(reason);
+                infoCol.appendChild(btnStrip);
+
+                card.appendChild(img);
+                card.appendChild(infoCol);
+                wrapper.appendChild(card);
+            });
+
+            chatMessages.appendChild(wrapper);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
         async function handleSendMessage() {
             const text = userInput.value.trim();
             if (!text) return;
 
-            // 1. Show user message instantly
             appendMessage(text, 'user');
             userInput.value = '';
 
             try {
-                // 2. Hit your Node.js Backend API
                 const response = await fetch('/api/chat', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message: text })
+                    body: JSON.stringify({ 
+                        sessionId: uniqueSessionId, 
+                        message: text 
+                    })
                 });
                 
                 const data = await response.json();
                 
-                // 3. Append the backend's response
-                appendMessage(data.reply, 'ai');
+                // Inspecting return package attributes to route visual output layout strategy
+                if (data.isRecommendation && Array.isArray(data.books)) {
+                    appendMessage("📚 I've compiled your preferences! Here are my top 3 book recommendations:", "ai");
+                    appendBookRecommendations(data.books);
+
+                    // AUTOMATIC DATABASE BACKGROUND PERSISTENCE
+                    // If the backend captured an authenticated email, persist the books to the SQLite tables instantly
+                    if (data.associatedEmail) {
+                        console.log(`💾 Auto-saving recommendations to database profile for: ${data.associatedEmail}`);
+
+                        fetch('/api/auth/register-and-save', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                email: data.associatedEmail,
+                                authProvider: 'email_code',
+                                initialBooks: data.books // Send over the array containing the recommended books
+                            })
+                        })
+                        .then(res => res.json())
+                        .then(savedState => {
+                            if (savedState.success) {
+                                console.log("✅ Database sync complete:", savedState.message);
+                                setTimeout(() => {
+                                    appendMessage("🔄 Your reading list is saved! Let me know when you're ready to look for something else.", "ai");
+                                }, 2000);
+                            } else {
+                                console.error("⚠️ Server processed request but database return was unsuccessful:", savedState.error);
+                            }
+                        })
+                        .catch(err => {
+                            console.error("❌ Network failure trying to sync recommendations table:", err);
+                        });
+                    }
+                } else {
+                    // Render standard conversational follow-ups directly in the layout bubble
+                    appendMessage(data.reply || 'Sorry, I encountered an issue handling the response sequence.', 'ai');
+                }
             } catch (error) {
                 console.error('Error contacting backend:', error);
-                appendMessage('Error: Unabile to reach the server.', 'ai');
+                appendMessage('Error: Unable to reach the server.', 'ai');
             }
         }
 

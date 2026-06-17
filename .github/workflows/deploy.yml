@@ -13,11 +13,10 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v6
 
-      - name: Create SSH Directory
-        run: mkdir -p ~/.ssh && chmod 700 ~/.ssh
-
-      - name: Write SSH Private Key
-        run: echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa && chmod 600 ~/.ssh/id_rsa
-
       - name: Deploy to Server via Native SCP
-        run: scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no -r . "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}:/var/www/recommend"
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no -r . "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}:/var/www/recommend"

@@ -9,7 +9,6 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
 
-    env:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4

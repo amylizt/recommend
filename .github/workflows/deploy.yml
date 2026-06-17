@@ -13,12 +13,14 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Deploy to Server via SCP
-        uses: appleboy/scp-action@v0.1.7  # Upgraded from @master to a stable release
-        with:
-          host: ${{ secrets.REMOTE_HOST }}
-          username: ${{ secrets.REMOTE_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          source: ".*,**/*"                # Fixed: Targets all files and subdirectories
-          target: "/var/www/recommend"
-          strip_components: 0
+      - name: Set up SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          # Scans the host to prevent the "unknown host" prompt from stalling the build
+          ssh-keyscan -H ${{ secrets.REMOTE_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to Server via Native SCP
+        run: |
+          scp -i ~/.ssh/id_rsa -r ./* ${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}:/var/www/recommend

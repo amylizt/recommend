@@ -13,14 +13,14 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v6
 
-      - name: Set up SSH Key
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          # Scans the host to prevent the "unknown host" prompt from stalling the build
-          ssh-keyscan -H ${{ secrets.REMOTE_HOST }} >> ~/.ssh/known_hosts
+      - name: Create SSH Directory
+        run: mkdir -p ~/.ssh && chmod 700 ~/.ssh
+
+      - name: Write SSH Private Key
+        run: echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa && chmod 600 ~/.ssh/id_rsa
+
+      - name: Scan Remote Host Key
+        run: ssh-keyscan -H "${{ secrets.REMOTE_HOST }}" >> ~/.ssh/known_hosts
 
       - name: Deploy to Server via Native SCP
-        run: |
-          scp -i ~/.ssh/id_rsa -r ./* ${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}:/var/www/recommend
+        run: scp -i ~/.ssh/id_rsa -r . "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}:/var/www/recommend"

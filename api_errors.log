@@ -1,0 +1,23 @@
+[2026-06-27T22:46:21.865Z] FAILURE: Fetch dropped for "Redshirts" by John Scalzi.
+Details: fetch failed
+Stack: TypeError: fetch failed
+-------------------------------------------------------
+[2026-06-27T22:46:22.060Z] FAILURE: Fetch dropped for "The Martian" by Andy Weir.
+Details: fetch failed
+Stack: TypeError: fetch failed
+-------------------------------------------------------
+[2026-06-27T23:17:27.541Z] FAILURE: Fetch dropped for "Project Hail Mary" by Andy Weir.
+Details: The operation was aborted due to timeout
+Underlying Cause: No underlying cause reported
+Stack: TimeoutError: The operation was aborted due to timeout
+-------------------------------------------------------
+[2026-06-27T23:17:31.544Z] FAILURE: Fetch dropped for "All Systems Red" by Martha Wells.
+Details: The operation was aborted due to timeout
+Underlying Cause: No underlying cause reported
+Stack: TimeoutError: The operation was aborted due to timeout
+-------------------------------------------------------
+[2026-06-27T23:17:35.546Z] FAILURE: Fetch dropped for "We Are Legion" by Dennis E. Taylor.
+Details: The operation was aborted due to timeout
+Underlying Cause: No underlying cause reported
+Stack: TimeoutError: The operation was aborted due to timeout
+-------------------------------------------------------

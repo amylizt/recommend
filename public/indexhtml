@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content">
+    <title>Responsive Node.js Chat</title>
+    <link rel="manifest" href="/manifest.json">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="SnookBook">
+    <link rel="apple-touch-icon" href="/icon_180.png">
+    <style>
+          /* Base reset */
+      * {
+          box-sizing: border-box;
+          margin: 0;
+          padding: 0;
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      }
+
+      /* Force the body to stay firmly fixed within the screen boundaries */
+      html, body {
+          position: fixed;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          width: 100%;
+          height: 100%;
+          overflow: hidden;
+          background-color: #f0f2f5;
+      }
+
+      /* MOBILE FIRST: Pin the container exactly to the edges of the visible screen */
+      .chat-container {
+          position: absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          display: flex;
+          flex-direction: column;
+          background: #ffffff;
+          width: 100%;
+          height: 100%;
+      }
+
+      /* Chat Header - Locked at the top */
+      .chat-header {
+          background-color: #075e54;
+          color: white;
+          padding: 15px;
+          font-size: 1.1rem;
+          font-weight: bold;
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          flex-shrink: 0;
+      }
+
+      .chat-header .status-dot {
+          width: 10px;
+          height: 10px;
+          background-color: #25d366;
+          border-radius: 50%;
+      }
+
+      /* Message Area - Independent scroll layer */
+      .chat-messages {
+          flex: 1;
+          padding: 20px;
+          overflow-y: auto;
+          -webkit-overflow-scrolling: touch; /* Smooth physics scrolling for iOS */
+          background-color: #efeae2;
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+      }
+
+      /* Message Bubbles */
+      .message {
+          max-width: 75%;
+          padding: 10px 14px;
+          border-radius: 8px;
+          font-size: 0.95rem;
+          line-height: 1.4;
+          word-wrap: break-word;
+      }
+
+      .message.user {
+          background-color: #d9fdd3;
+          align-self: flex-end;
+          border-top-right-radius: 0;
+      }
+
+      .message.ai {
+          background-color: #ffffff;
+          align-self: flex-start;
+          border-top-left-radius: 0;
+          box-shadow: 0 1px 1px rgba(0,0,0,0.05);
+      }
+
+      /* Input Area Footer - Locked at the absolute bottom */
+      .chat-input-area {
+          background-color: #f0f2f5;
+          padding: 12px 15px;
+          display: flex;
+          gap: 10px;
+          align-items: center;
+          flex-shrink: 0;
+          border-top: 1px solid #e1e6eb;
+      }
+
+      .chat-input-area input {
+          flex: 1;
+          padding: 12px 15px;
+          border: 1px solid #e1e6eb;
+          border-radius: 20px;
+          outline: none;
+          font-size: 16px; /* 16px strictly prevents iOS auto-zoom behavior */
+      }
+
+      .chat-input-area button {
+          background-color: #075e54;
+          color: white;
+          border: none;
+          padding: 12px 20px;
+          border-radius: 20px;
+          cursor: pointer;
+          font-weight: bold;
+          font-size: 0.95rem;
+      }
+
+      /* --- Responsive Media Queries: Override absolute fullscreen on larger devices --- */
+
+      /* Tablets (iPads) */
+      @media (min-width: 481px) and (max-width: 1024px) {
+          body {
+              display: flex;
+              justify-content: center;
+              align-items: center;
+          }
+          .chat-container {
+              position: relative;
+              width: 80%;
+              height: 80vh;
+              border-radius: 12px;
+              overflow: hidden;
+              box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+          }
+      }
+
+      /* Desktop Computers */
+      @media (min-width: 1025px) {
+          body {
+              display: flex;
+              justify-content: center;
+              align-items: center;
+          }
+          .chat-container {
+              position: relative;
+              width: 450px;
+              height: 700px;
+              border-radius: 12px;
+              overflow: hidden;
+              box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+          }
+      }
+    </style>
+</head>
+<body>
+
+    <div class="chat-container">
+        <div class="chat-header">
+            <div class="status-dot"></div>
+            <span>My Snook Book</span>
+        </div>
+        
+        <div class="chat-messages" id="chatMessages">
+            <div class="message ai">Say hello and lets discuss books!.</div>
+        </div>
+
+        <div class="chat-input-area">
+            <input type="text" id="userInput" placeholder="Type a message..." autocomplete="off">
+            <button id="sendBtn">Send</button>
+        </div>
+    </div>
+    <script>
+        const chatMessages = document.getElementById('chatMessages');
+        const userInput = document.getElementById('userInput');
+        const sendBtn = document.getElementById('sendBtn');
+
+        let uniqueSessionId = localStorage.getItem('chat_session_id');
+
+        if (!uniqueSessionId) {
+            uniqueSessionId = 'sess_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+            localStorage.setItem('chat_session_id', uniqueSessionId);
+        }
+
+        function appendMessage(text, sender) {
+            const msgDiv = document.createElement('div');
+            msgDiv.classList.add('message', sender);
+            msgDiv.innerText = text;
+            chatMessages.appendChild(msgDiv);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        // Dedicated renderer to inject full functional visual layout blocks directly into the stream 
+// Dedicated renderer to inject the updated single-link Google search cards
+        function appendBookRecommendations(booksArray) {
+            const wrapper = document.createElement('div');
+            wrapper.style.display = 'flex';
+            wrapper.style.flexDirection = 'column';
+            wrapper.style.gap = '16px';
+            wrapper.style.margin = '12px 0';
+            wrapper.style.width = '100%';
+
+            booksArray.forEach(book => {
+                const card = document.createElement('div');
+                card.style.display = 'flex';
+                card.style.gap = '14px';
+                card.style.background = '#ffffff';
+                card.style.padding = '12px';
+                card.style.borderRadius = '8px';
+                card.style.border = '1px solid #eef0f2';
+                card.style.boxShadow = '0 2px 5px rgba(0,0,0,0.05)';
+
+                // Visual Cover image asset
+                const img = document.createElement('img');
+                img.src = book.imageUrl;
+                img.style.width = '85px';
+                img.style.height = '125px';
+                img.style.objectFit = 'cover';
+                img.style.borderRadius = '4px';
+                img.style.border = '1px solid #e2e8f0';
+
+                // Core details column
+                const infoCol = document.createElement('div');
+                infoCol.style.display = 'flex';
+                infoCol.style.flexDirection = 'column';
+                infoCol.style.flex = '1';
+
+                const title = document.createElement('div');
+                title.innerText = book.title;
+                title.style.fontWeight = 'bold';
+                title.style.fontSize = '0.95rem';
+                title.style.color = '#111';
+
+                const author = document.createElement('div');
+                author.innerText = `by ${book.author}`;
+                author.style.color = '#666';
+                author.style.fontSize = '0.85rem';
+                author.style.margin = '2px 0 6px 0';
+
+                const reason = document.createElement('div');
+                reason.innerText = book.reason;
+                reason.style.fontSize = '0.85rem';
+                reason.style.color = '#444';
+                reason.style.marginBottom = '12px';
+
+                // Action Bar supporting the high-intent Google search lookup
+                const btnStrip = document.createElement('div');
+                btnStrip.style.display = 'flex';
+                btnStrip.style.gap = '8px';
+
+                const makeBtn = (url, label, bgColor) => {
+                    const btn = document.createElement('a');
+                    btn.href = url;
+                    btn.target = '_blank';
+                    btn.innerText = label;
+                    btn.style.textDecoration = 'none';
+                    btn.style.fontSize = '0.75rem';
+                    btn.style.fontWeight = 'bold';
+                    btn.style.padding = '6px 12px';
+                    btn.style.borderRadius = '4px';
+                    btn.style.color = '#fff';
+                    btn.style.backgroundColor = bgColor;
+                    return btn;
+                };
+
+                // Map button directly onto the Google Search payload option
+                const googleBtn = makeBtn(book.googleUrl, 'Find on Amazon & B&N', '#4285F4');
+                btnStrip.appendChild(googleBtn);
+
+                infoCol.appendChild(title);
+                infoCol.appendChild(author);
+                infoCol.appendChild(reason);
+                infoCol.appendChild(btnStrip);
+
+                card.appendChild(img);
+                card.appendChild(infoCol);
+                wrapper.appendChild(card);
+            });
+
+            chatMessages.appendChild(wrapper);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+        async function handleSendMessage() {
+            const text = userInput.value.trim();
+            if (!text) return;
+
+            appendMessage(text, 'user');
+            userInput.value = '';
+
+            try {
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        sessionId: uniqueSessionId, 
+                        message: text 
+                    })
+                });
+                
+                const data = await response.json();
+                
+                // Inspecting return package attributes to route visual output layout strategy
+                if (data.isRecommendation && Array.isArray(data.books)) {
+                    appendMessage("📚 I've compiled your preferences! Here are my top 3 book recommendations:", "ai");
+                    appendBookRecommendations(data.books);
+
+                    // AUTOMATIC DATABASE BACKGROUND PERSISTENCE
+                    // If the backend captured an authenticated email, persist the books to the SQLite tables instantly
+                    if (data.associatedEmail) {
+                        console.log(`💾 Auto-saving recommendations to database profile for: ${data.associatedEmail}`);
+
+                        fetch('/api/auth/register-and-save', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                email: data.associatedEmail,
+                                authProvider: 'email_code',
+                                initialBooks: data.books // Send over the array containing the recommended books
+                            })
+                        })
+                        .then(res => res.json())
+                        .then(savedState => {
+                            if (savedState.success) {
+                                console.log("✅ Database sync complete:", savedState.message);
+                                setTimeout(() => {
+                                    appendMessage("🔄 Your reading list is saved! Let me know when you're ready to look for something else.", "ai");
+                                }, 2000);
+                            } else {
+                                console.error("⚠️ Server processed request but database return was unsuccessful:", savedState.error);
+                            }
+                        })
+                        .catch(err => {
+                            console.error("❌ Network failure trying to sync recommendations table:", err);
+                        });
+                    }
+                } else {
+                    // Render standard conversational follow-ups directly in the layout bubble
+                    appendMessage(data.reply || 'Sorry, I encountered an issue handling the response sequence.', 'ai');
+                }
+            } catch (error) {
+                console.error('Error contacting backend:', error);
+                appendMessage('Error: Unable to reach the server.', 'ai');
+            }
+        }
+
+        sendBtn.addEventListener('click', handleSendMessage);
+        userInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') handleSendMessage();
+        });
+    </script>
+</body>
+</html>

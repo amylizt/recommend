@@ -3,3 +3,5 @@ node_modules/
 *~
 *.un~
 orig_app.txt
+*.log
+oldindex

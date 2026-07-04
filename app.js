@@ -19,7 +19,7 @@ const db = new Pool({
     port: parseInt(process.env.DB_PORT || '5432', 10),
 });
 
-
+setupDB()
 const PromptMatrix = [
     {
         id: 'systemContextText',
@@ -30,16 +30,43 @@ const PromptMatrix = [
                 : `[SYSTEM: User successfully entered verification code. This is a BRAND NEW account. Welcome them to the platform for the first time, and ask what genres or authors they love.]`;
         }
     },
+        {
+        id: 'welcomePreAuthenticated',
+        build: (session) => {
+            return `
+                You are an expert, friendly book recommendation concierge. Keep responses short and conversational (1-2 sentences max).
+
+                CRITICAL ACCOUNT LOGIC RULES:
+                - User is NOT AUTHENTICATED. SHOW onboarding/greeting options or ask them to sign in.
+                
+                GREETING STYLE DIRECTION:
+                - Greet them warmly and casually asking them to sign in.
+                - ONLY ASK ONE BRIEF QUESTION. Do not suggest books yet.
+            `;
+        }
+    },
+    {   id: 'welcomePostAuthenticated',
+        build: (session) => {
+            return `
+                You are an expert, friendly book recommendation concierge. Keep responses short and conversational (1-2 sentences max).
+
+                CRITICAL ACCOUNT LOGIC RULES:
+                - User is ALREADY AUTHENTICATED. Do NOT show onboarding/greeting options or ask them to sign in.
+                - Match your welcome tone to their status (new vs returning) passed in the system context.
+                
+                GREETING STYLE DIRECTION:
+                - Greet them warmly and casual using their name or email identifier (e.g., "Welcome to the platform, amylizt! I'm so glad you're here...").
+                - You MUST immediately ask your first casual profiling question in this turn to prompt them for their preferences (e.g., "...to get us started, what are some of your favorite authors or genres you've been enjoying lately?").
+                - ONLY ASK ONE BRIEF QUESTION. Do not suggest books yet.
+            `;
+        }
+    },
     {
-        id: 'discoverySystemInstruction',
+        id: 'mainPrompt',
         build: (session) => {
             const hasRecs = session.excludedBooks && session.excludedBooks.length > 0;
             const blacklist = hasRecs ? `CRITICAL EXCLUSIONS: You have already recommended: ${session.excludedBooks.join(', ')}. NEVER suggest these books or their sequels. Focus on fresh content.\n` : '';
-            
-            const accountRule = session.isAuthenticated
-                ? `- User is ALREADY AUTHENTICATED. Do NOT show onboarding/greeting options or ask them to sign in. Treat them as logged in.`
-                : `- Unauthenticated greeting: If they just say hi, you MUST reply with exactly: "If you want to sign in or create an account let's start with your email address. Otherwise, we can skip that for now—what are some of your favorite books or authors?"`;
-
+                        
             return `
                 You are an expert, friendly book recommendation concierge. Keep responses short and conversational (1-2 sentences max).
 
@@ -53,8 +80,10 @@ const PromptMatrix = [
 
                 ${blacklist}
                 CRITICAL ACCOUNT LOGIC RULES:
-                ${accountRule}
-                - If you see "[SYSTEM: User successfully entered verification code...]", match your welcome to their status (new vs returning), then immediately ask your first casual profiling question in the same turn.
+                - User is ALREADY AUTHENTICATED. 
+                - DO NOT COMPOSE A WELCOME MESSAGE
+                - DO NOT MENTION mention verification codes or ask them to sign in. 
+                - MOVE straight into conversational profiling or delivering recommendations.
 
                 CRITICAL FLOW & FORMATTING:
                 - ONLY ASK ONE BRIEF QUESTION AT A TIME. Keep it casual.
@@ -78,6 +107,7 @@ async function setupDB (){
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         `);
+
         await db.query(`
             CREATE TABLE IF NOT EXISTS recommendations (
                 id SERIAL PRIMARY KEY,
@@ -107,12 +137,7 @@ async function setupDB (){
     }
 }
 
-async function createUser (userId, email) {
-    await db.query(
-        `INSERT INTO users (id, email) VALUES ($1, $2) ON CONFLICT(email) DO NOTHING`,
-        [userId, email]
-    );
-}
+
 
 async function retrieveBooks(userId){
     const result = await db.query(
@@ -123,6 +148,107 @@ async function retrieveBooks(userId){
        [userId]
         );
     return result.rows || [];
+}
+
+
+/*
+CHAT NOTES
+1. First hello no authentication and no history.
+2. Authentication and no chat history.
+3. Authentication and chat history.
+4. No authentication and chat history.
+*/
+
+/**
+ * Generates a fresh, default state payload structure for a new chat session.
+ */
+
+//Create Session
+function createSession() {
+    console.log(`🆕 Generating fresh session payload parameters.`);
+    return { 
+        history: [
+            { role: "model", parts: [{ text: "Say hello and let's discuss books!" }] }
+        ],
+        authEmail: null,
+        authCode: null,
+        isAuthenticated: false,
+        userId: null,
+        excludedBooks: []
+    };
+}
+//AI Call
+
+async function callAI(history, systemPrompt) {
+    const maxRetries = 3;
+    let currentDelay = 1500;
+    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        console.log(`🤖 Requesting Gemini generation (Attempt ${attempt}/${maxRetries})...`);
+        try {
+            const response = await ai.models.generateContent({
+                model: "gemini-3.1-flash-lite", 
+                contents: history,
+                config: {
+                    systemInstruction: systemPrompt,
+                    temperature: 0.6, 
+                },
+            });
+            return response;
+        } catch (error) {
+            const is503 = error.status === 503 || 
+                          (error.error && error.error.code === 503) || 
+                          error.message?.includes('503');
+                          
+            if (is503 && attempt < maxRetries) {
+                console.warn(`⏳ 503 Service Unavailable. Retrying in ${currentDelay}ms...`);
+                await sleep(currentDelay);
+                currentDelay *= 2;
+                continue;
+            }
+            throw error; 
+        }
+    }
+}
+
+//logging in
+async function createUser (userId, email) {
+    await db.query(
+        `INSERT INTO users (id, email) VALUES ($1, $2) ON CONFLICT(email) DO NOTHING`,
+        [userId, email]
+    );
+}
+
+async function handleEmailAddress(session, detectedEmail, res) {
+    session.authEmail = detectedEmail[0].toLowerCase().trim();
+    const authData = await initEmailReg(session.authEmail);
+    session.userId = authData.userId;
+    session.authCode = authData.authCode;
+    return res.json({
+        reply: authData.message,
+        associatedEmail: session.authEmail
+    });
+}
+
+async function initEmailReg(emailTarget) {
+    console.log("initEmailReg")
+    let userId;
+    try {
+        const result = await db.query(`SELECT id FROM users WHERE LOWER(email) = $1`, [emailTarget]);
+        userId = result.rows.length > 0 ? result.rows[0].id : `usr_${Date.now()}`;
+    } catch (dbErr) {
+        console.error("❌ DB Check Failed:", dbErr.message);
+        userId = `usr_${Date.now()}`;
+    }
+    const authCode = Math.floor(100000 + Math.random() * 900000).toString();
+    await sendVerificationEmail(emailTarget, authCode);
+
+    return { 
+        userId, 
+        authCode,
+        message: `I've sent a 6-digit verification code to ${emailTarget}. Please enter it here to link your account!` 
+    };
 }
 
 async function sendVerificationEmail(targetEmail, pinCode) {
@@ -146,325 +272,220 @@ async function sendVerificationEmail(targetEmail, pinCode) {
 
         if (error) {
             console.error(`❌ Resend Delivery Error to ${targetEmail}:`, error.message);
-            return;
+            return false;
         }
         console.log(`✉️ Mail successfully dispatched via Resend API to ${targetEmail}. ID: ${data.id}`);
+        return true;
     } catch (err) {
         console.error(`❌ Unexpected processing breakdown during mail dispatch:`, err.message);
+        return false;
     }
 }
 
-
-/*
-CHAT NOTES
-1. First hello no authentication and no history.
-2. Authentication and no chat history.
-3. Authentication and chat history.
-4. No authentication and chat history.
-*/
-
-/**
- * Generates a fresh, default state payload structure for a new chat session.
- */
-function createSession() {
-    console.log(`🆕 Generating fresh session payload parameters.`);
-    return { 
-        history: [
-            { role: "model", parts: [{ text: "Say hello and let's discuss books!" }] }
-        ],
-        authEmail: null,
-        authCode: null,
-        isAuthenticated: false,
-        userId: null,
-        excludedBooks: []
-    };
+async function doVerify(session, structuralDigits) {
+    console.log("doVerify")
+    if (structuralDigits && structuralDigits === session.authCode) {
+        session.isAuthenticated = true;
+        const welcomeMessage = await handleSuccessfulVerification(session);     
+        return {
+            reply: welcomeMessage,
+            associatedEmail: session.authEmail
+        };
+        
+    } else if (/^\d{6}$/.test(structuralDigits)) {
+        return { 
+            reply: "That verification code doesn't match what I generated. Could you please double-check your code?",
+            associatedEmail: null
+        };
+    } else {
+        return {
+            reply: `We're waiting for the 6-digit verification code sent to ${session.authEmail}. Please enter it to continue, or provide a different email address.`,
+            associatedEmail: null
+        };
+    }
+   
 }
 
-async function initEmailReg(emailTarget) {
-    let userId;
+async function handleSuccessfulVerification(session) {
+    console.log("handleSuccessfulVerification")
     try {
-        const result = await db.query(`SELECT id FROM users WHERE LOWER(email) = $1`, [emailTarget]);
-        userId = result.rows.length > 0 ? result.rows[0].id : `usr_${Date.now()}`;
+        await createUser(session.userId, session.authEmail);
+        const activeRecs = await retrieveBooks(session.userId);
+        if (activeRecs && activeRecs.length > 0) {
+            session.excludedBooks = activeRecs.map(b => `"${b.book_title}" by ${b.author}`);
+        }
     } catch (dbErr) {
-        console.error("❌ DB Check Failed:", dbErr.message);
-        userId = `usr_${Date.now()}`;
-    }
-    const authCode = Math.floor(100000 + Math.random() * 900000).toString();
-    sendVerificationEmail(emailTarget, authCode);
-
-    return { userId, authCode };
-}
-
-
-async function callAI(history, systemPrompt) {
-    const maxRetries = 3;
-    let currentDelay = 1500;
-    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        console.log(`🤖 Requesting Gemini generation (Attempt ${attempt}/${maxRetries})...`);
-        try {
-            const response = await ai.models.generateContent({
-                model: "gemini-3.1-flash-lite", 
-                contents: history,
-                config: {
-                    systemInstruction: systemPrompt,
-                    temperature: 0.6, 
-                },
-            });
-            return response; // Return immediately on success
-        } catch (error) {
-            const is503 = error.status === 503 || 
-                          (error.error && error.error.code === 503) || 
-                          error.message?.includes('503');
-                          
-            if (is503 && attempt < maxRetries) {
-                console.warn(`⏳ 503 Service Unavailable. Retrying in ${currentDelay}ms...`);
-                await sleep(currentDelay);
-                currentDelay *= 2;
-                continue;
-            }
-            throw error; // Fail fast if it's a non-503 error or we ran out of attempts
-        }
-    }
-}
-
-app.post('/api/chat', async (req, res) => {
-    const { sessionId, message } = req.body;
-    const cleanMessage = message ? message.trim() : ""; 
-    if (!sessionId) {return res.status(400).json({ error: "A unique sessionId is required." });}
-    if (!chatSessions[sessionId]) { chatSessions[sessionId] = createSession(); }
-    const session = chatSessions[sessionId];
-
-    if (session.authEmail && !session.isAuthenticated) {
-        const structuralDigits = cleanMessage.replace(/\s+/g, "");
-        
-        if (structuralDigits && structuralDigits === session.authCode) {
-            session.isAuthenticated = true;
-            console.log(`🔒 Session ${sessionId} authenticated successfully for user: ${session.authEmail}`);
-            
-            try {
-                await createUser(session.userId, session.authEmail);
-                const activeRecs = await retrieveBooks( session.userId )
-                if (activeRecs && activeRecs.length > 0) {
-                    session.excludedBooks = activeRecs.map(b => `"${b.book_title}" by ${b.author}`);
-                    console.log(`📚 Loaded ${session.excludedBooks.length} historical book exclusions.`);
-                }
-            } catch (dbErr) {
-                console.error("Database user setup error:", dbErr.message);
-            }
-            const systemContextText = PromptMatrix.find(p => p.id === 'systemContextText').build(session);
-            session.history.push({ 
-                role: "user", 
-                parts: [{ text: systemContextText }] 
-            });
-            
-        } else if (/^\d{6}$/.test(structuralDigits)) {
-            return res.json({ 
-                reply: "That verification code doesn't match what I generated. Could you please double-check your code?",
-                associatedEmail: null
-            });
-        } else {
-            return res.json({
-                reply: `We're waiting for the 6-digit verification code sent to ${session.authEmail}. Please enter it to continue, or provide a different email address.`,
-                associatedEmail: null
-            });
-        }
-        const aiResponse = await callAI(session.history, systemContextText);
+        console.error("Database user setup error:", dbErr.message);
     }
 
-    if (session.history[session.history.length - 1].role !== "user") {
-        session.history.push({ role: "user", parts: [{ text: cleanMessage }] });
-    }
-    if ( session.history[session.history.length - 1].role !== "user") {
-        session.history.push({ role: "user", parts: [{ text: message }] });
-    }
-
-    const detectedEmail = message.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-
-    if (detectedEmail && !session.authEmail) { 
-        session.authEmail = detectedEmail[0].toLowerCase().trim();
-        const authData = await initEmailReg( session.authEmail );
-        session.userId = authData.userId;
-        session.authCode = authData.authCode;
-    }
-        
-    const masterSystemPrompt = PromptMatrix.find(p => p.id === 'discoverySystemInstruction').build(session);
-    const maxRetries = 3;
-    let currentDelay = 1500;
-    let response;
+    const systemContextText = PromptMatrix.find(p => p.id === 'systemContextText').build(session);
+    session.history.push({ 
+        role: "user", 
+        parts: [{ text: systemContextText }] 
+    });
     
-
-    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
-
+    const masterSystemPrompt = PromptMatrix.find(p => p.id === 'mainPrompt').build(session);
+    const aiResponse = await callAI(session.history, masterSystemPrompt);
+    session.history.push({ 
+        role: "model", 
+        parts: [{ text: aiResponse.text }] 
+    });
+    return aiResponse.text;
+}
+async function doIntro(session){
+    console.log("doIntro")
+    const welcomePrePrompt = PromptMatrix.find(p => p.id === 'welcomePreAuthenticated').build(session);
     try {
-        response = await callAI(session.history, masterSystemPrompt);
+        const response = await callAI(session.history, welcomePrePrompt);
+        const replyText = response.text || response.candidates?.[0]?.content?.parts?.[0]?.text;
+        session.history.push({ role: "model", parts: [{ text: replyText }] });
+        return { reply: replyText, associatedEmail: null };
+    } catch (error) {
+        console.error("Chat Generation Failure:", error);
+        throw error;
+    }
+}
+
+//Book Chat
+async function handleBookChat(session, res) {
+    try {
+        const mainPrompt = PromptMatrix.find(p => p.id === 'mainPrompt').build(session);    
+        const response = await callAI(session.history, mainPrompt);
         let replyText = response.text || response.candidates?.[0]?.content?.parts?.[0]?.text;
         session.history.push({ role: "model", parts: [{ text: replyText }] });
-        
         let cleanedText = replyText.replace(/```json|```/g, "").trim();
         const isJson = (cleanedText.startsWith('[') && cleanedText.endsWith(']'));
 
         if (isJson) {
-            const rawBooks = JSON.parse(cleanedText);
-
-            const cleanedBooks = rawBooks.map(book => {
-                let cleanTitle = book.title.replace(/\(.*?\)|\[.*?\]|[:\-–—.,!?]/g, "").replace(/\s+/g, " ").trim();
-                return { originalTitle: book.title, cleanTitle, author: book.author, reason: book.reason };
-            });
-
-
-            const enrichedBooks = [];
-            const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
-            // Unified helper to lower-case, strip all punctuation, and normalize whitespace chunks
-            const normalize = (str) => {
-                if (!str) return "";
-                return str.toLowerCase()
-                          .replace(/[^\w\s]/g, "") // Strips commas, colons, dashes, etc.
-                          .replace(/\s+/g, " ")    // Collapses multiple consecutive spaces
-                          .trim();
-            };
-
-
-            for (const book of cleanedBooks) {
-                let coverUrl = "https://via.placeholder.com/120x180?text=No+Cover";
-                const cleanTargetTitle = normalize(book.cleanTitle);
-                const cleanTargetAuthor = normalize(book.author);
-
-                try {
-
-                    const cacheCheck = await db.query(
-                        `SELECT cover_url FROM open_library_cache 
-                         WHERE normalized_title = $1 AND normalized_author = $2`,
-                        [cleanTargetTitle, cleanTargetAuthor]
-                    );
-
-                    if (cacheCheck.rows.length > 0) {
-                        coverUrl = cacheCheck.rows[0].cover_url;
-                        console.log(`🗄️ Cache HIT: Retrieved cover locally from DB for "${book.cleanTitle}"`);
-                    } else {
-
-                        console.log(`🌐 Cache MISS: Requesting live network payload for "${book.cleanTitle}"`);
-                        const searchUrl = `https://openlibrary.org/search.json?q=${encodeURIComponent(book.cleanTitle + ' ' + book.author)}&fields=title,author_name,cover_i&limit=5`;
-                        
-                        const headers = new Headers({
-                            "User-Agent": "SnookBook/1.0 (amylizt@gmail.com)"
-                        });
-                        
-                        const options = {
-                            method: 'GET',
-                            headers: headers,
-                            signal: AbortSignal.timeout(4000) 
-                        };
-
-                        const apiRes = await fetch(searchUrl, options);
-                        const apiData = await apiRes.json();
-                        const docs = apiData.docs || [];
-
-                        const matchedDoc = docs.find(d => {
-                            if (!d.cover_i) return false;
-                            
-                            const cleanDbTitle = normalize(d.title);
-                            const isTitleMatch = cleanDbTitle === cleanTargetTitle;
-                            
-                            const isAuthorMatch = d.author_name && d.author_name.some(author => {
-                                const cleanDbAuthor = normalize(author);
-                                return cleanDbAuthor.includes(cleanTargetAuthor) || cleanTargetAuthor.includes(cleanDbAuthor);
-                            });
-                            
-                            return isTitleMatch && isAuthorMatch;
-                        });
-
-                        if (matchedDoc) {
-                            coverUrl = `https://covers.openlibrary.org/b/id/${matchedDoc.cover_i}-M.jpg`;
-                            console.log(`🎯 Live verification match succeeded for "${book.cleanTitle}": ${coverUrl}`);
-                        } else {
-                            console.log(`⚠️ No strict title/author document with a cover found for: "${book.cleanTitle}"`);
-                        }
-
-
-                        await db.query(
-                            `INSERT INTO open_library_cache (normalized_title, normalized_author, cover_url)
-                             VALUES ($1, $2, $3)
-                             ON CONFLICT (normalized_title, normalized_author) DO NOTHING`,
-                            [cleanTargetTitle, cleanTargetAuthor, coverUrl]
-                        );
-                        
-
-                        await sleep(400);
-                    }
-                } catch (apiErr) {
-                    console.error(`⚠️ Cover metadata lookup failed for ${book.cleanTitle}:`, apiErr.message);
-                    
-                    const underlyingError = apiErr.cause ? apiErr.cause.message : 'No underlying cause reported';
-                    try {
-                        const logPath = path.join(__dirname, 'api_errors.log');
-                        const timestamp = new Date().toISOString();
-                        const logPayload = `[${timestamp}] FAILURE: Fetch dropped for "${book.cleanTitle}" by ${book.author}.\nDetails: ${apiErr.message}\nUnderlying Cause: ${underlyingError}\nStack: ${apiErr.stack}\n-------------------------------------------------------\n`;
-                        
-                        fs.appendFile(logPath, logPayload, (fsErr) => {
-                            if (fsErr) console.error("❌ Failed to write to local log file:", fsErr.message);
-                        });
-                    } catch (logCatchErr) {
-                        console.error("❌ Critical logging error:", logCatchErr.message);
-                    }
-                }
-
-
-                enrichedBooks.push({
-                    title: book.originalTitle,
-                    author: book.author,
-                    reason: book.reason,
-                    imageUrl: coverUrl, 
-                    googleUrl: `https://www.google.com/search?q=${encodeURIComponent(`${book.author} ${book.cleanTitle} book amazon and barnes and noble`)}` 
-                });
-            } 
-            console.log(`💾 Saving recommendations to existing user record ID: ${userId}`);
-            await db.query(
-                `UPDATE user_recommendations SET history = history || $1 WHERE user_id = $2`,
-                [JSON.stringify(enrichedBooks), userId]
-            );
-
-
-            return res.json({
-                success: true,
-                message: "Recommendations compiled successfully.",
-                books: enrichedBooks
-            });
-
-            const savedEmail = session.authEmail;
-            const savedUserId = session.userId;
-            const savedExclusions = [...session.excludedBooks, ...cleanedBooks.map(b => `"${b.originalTitle}" by ${b.author}`)];
-
-            chatSessions[sessionId] = {
-                history: [{ role: "model", parts: [{ text: "Let's find some more books!" }] }],
-                authEmail: savedEmail,
-                authCode: null,
-                isAuthenticated: true,
-                userId: savedUserId,
-                excludedBooks: savedExclusions
-            };
-
-            return res.json({ 
-                isRecommendation: true, 
-                books: enrichedBooks,
-                associatedEmail: savedEmail 
-            });
-
+            return await formatBooks(cleanedText, res, session);
         } else {
-            return res.json({ reply: replyText, associatedEmail: session.isAuthenticated ? session.authEmail : null });
+            return res.json({ 
+                reply: replyText, 
+                associatedEmail: session.isAuthenticated ? session.authEmail : null 
+            });
         }
-
     } catch (error) {
         console.error("Enrichment Pipeline Error:", error);
-        res.status(500).json({ reply: "An error occurred while compiling recommendations." });
+        return res.status(500).json({ reply: "An error occurred while compiling recommendations." });
+    }
+}
+async function formatBooks( cleanedText, res, session ){
+        const rawBooks = JSON.parse(cleanedText);
+        const cleanedBooks = rawBooks.map(book => {
+            let cleanTitle = book.title.replace(/\(.*?\)|\[.*?\]|[:\-–—.,!?]/g, "").replace(/\s+/g, " ").trim();
+            return { originalTitle: book.title, cleanTitle, author: book.author, reason: book.reason };
+        });
+        const enrichedBooks = [];
+        const normalize = (str) => {
+            if (!str) return "";
+            return str.toLowerCase()
+                    .replace(/[^\w\s]/g, "")
+                    .replace(/\s+/g, " ")    
+                    .trim();
+        };
+        for (const book of cleanedBooks) {
+            const coverUrl = await getCoverUrl( book);
+            enrichedBooks.push({
+                title: book.originalTitle,
+                author: book.author,
+                reason: book.reason,
+                imageUrl: coverUrl, 
+                googleUrl: `https://www.google.com/search?q=${encodeURIComponent(`${book.author} ${book.cleanTitle} book amazon and barnes and noble`)}` 
+            });
+        }
+        const savedExclusions = [...session.excludedBooks, ...cleanedBooks.map(b => `"${b.originalTitle}" by ${b.author}`)];
+        chatSessions[session.sessionId] = {
+            history: [{ role: "model", parts: [{ text: "Let's find some more books!" }] }],
+            authEmail: session.authEmail,
+            authCode: null,
+            isAuthenticated: true,
+            userId: session.userId,
+            excludedBooks: savedExclusions
+        };
+        return res.json({ 
+            isRecommendation: true, 
+            books: enrichedBooks,
+            associatedEmail: session.authEmail 
+        });
+
+}
+
+async function getCoverUrl( book) {
+    const normalize = (str) => {return (str || "").toLowerCase().replace(/[^\w\s]/g, "").replace(/\s+/g, " ").trim();};
+    const cacheCheck = await db.query(
+        `SELECT cover_url FROM open_library_cache 
+        WHERE normalized_title = $1 AND normalized_author = $2`,
+        [normalize(book.cleanTitle), normalize(book.author)]
+    );
+    if (cacheCheck.rows.length > 0) {return cacheCheck.rows[0].cover_url;  }
+    let coverUrl = "https://via.placeholder.com/120x180?text=No+Cover";
+    const searchUrl = `https://openlibrary.org/search.json?q=${encodeURIComponent(book.cleanTitle + ' ' + book.author)}&fields=title,author_name,cover_i&limit=5`;
+    const headers = new Headers({"User-Agent": "SnookBook/1.0 (amylizt@gmail.com)" });
+    const options = {method: 'GET', headers: headers, signal: AbortSignal.timeout(4000)};
+    if( !coverUrl === "https://via.placeholder.com/120x180?text=No+Cover"){
+        await db.query(
+            `INSERT INTO open_library_cache (normalized_title, normalized_author, cover_url)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (normalized_title, normalized_author) DO NOTHING`,
+            [normalize(book.cleanTitle), normalize(book.author), coverUrl]
+        );
+    }
+    try {
+        const apiRes = await fetch(searchUrl, options).then(res => res.json());
+        const matchedDoc = (apiRes.docs || []).find(d => d.cover_i);
+        if (matchedDoc) { coverUrl = `https://covers.openlibrary.org/b/id/${matchedDoc.cover_i}-M.jpg`;}
+        const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+        await sleep(400);
+
+    } catch (apiErr) {
+        console.error(`⚠️ Cover metadata lookup failed for ${book.cleanTitle}:`, apiErr.message);
+    }
+
+    if (coverUrl === "https://via.placeholder.com/120x180?text=No+Cover") {
+        const title = book.originalTitle || book.cleanTitle;
+        const displayTitle = title.length > 50 ? title.substring(0, 47) + '...' : title;
+        
+        coverUrl = `data:image/svg+xml;utf8,${encodeURIComponent(`
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 180" width="120" height="180">
+            <rect width="120" height="180" fill="#555555" rx="2" />
+            <rect x="4" y="4" width="112" height="172" fill="none" stroke="#ffffff" stroke-width="0.75" stroke-opacity="0.2" rx="1" />
+            <foreignObject x="8" y="20" width="104" height="140">
+                <p xmlns="http://www.w3.org/1999/xhtml" style="margin:0; padding:0; color:#ffffff; font-family:sans-serif; font-size:20px; 
+                font-weight:bold; text-align:center; line-height:1.3; display:-webkit-box; -webkit-line-clamp:7; -webkit-box-orient:vertical; overflow:hidden;">
+                    ${displayTitle}
+                </p>
+            </foreignObject>
+        </svg>`.trim().replace(/\s+/g, ' '))}`;
+    }
+
+    return coverUrl;
+}
+
+//api
+app.post('/api/chat', async (req, res) => {
+    const { sessionId, message } = req.body;
+    const cleanMessage = message ? message.trim() : ""; 
+    const structuralDigits = cleanMessage.replace(/\D/g, "");
+    if (!sessionId) { return res.status(400).json({ error: "A unique sessionId is required." });  }
+    if (!chatSessions[sessionId]) { chatSessions[sessionId] = createSession(); }
+    const session = chatSessions[sessionId];
+    session.sessionId = sessionId;
+    const isVerifying = session.authEmail && !session.isAuthenticated;
+    const detectedEmail = message.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+    const isRegisteringEmail = detectedEmail && !session.authEmail;
+    const isNewUser = !session.isAuthenticated && !session.authEmail;
+    const isAuthenticatedUser = session.isAuthenticated === true;
+    if (session.history[session.history.length - 1].role !== "user") {session.history.push({ role: "user", parts: [{ text: cleanMessage }] }); }
+    switch (true) {
+        case isRegisteringEmail: return await handleEmailAddress(session, detectedEmail, res);
+        case isVerifying: {return res.json(await doVerify(session, structuralDigits));}
+        case isNewUser: return res.json(await doIntro(session));
+        case isAuthenticatedUser: return await handleBookChat(session, res);
+        default:return res.status(400).json({ error: "Unhandled chat state." });
     }
 });
 
-// Endpoint to mark a book as removed
-app.post('/api/recommendations/status', async (req, res) => {
+/*app.post('/api/recommendations/status', async (req, res) => {
     const { email, title, author, status } = req.body; // status will be 'removed'
 
     if (!email || !title || !author || !status) {
@@ -493,7 +514,7 @@ app.post('/api/recommendations/status', async (req, res) => {
     }
 });
 
-// Endpoint to fetch all non-removed books for a specific user
+
 app.get('/api/recommendations/saved', async (req, res) => {
     const { email } = req.query;
 
@@ -526,7 +547,6 @@ app.get('/api/recommendations/saved', async (req, res) => {
 });
 
 
-// Endpoint to persist initial user and recommendation records safely
 app.post('/api/auth/register-and-save', async (req, res) => {
     const { email, authProvider, initialBooks } = req.body;
     
@@ -584,6 +604,6 @@ app.post('/api/auth/register-and-save', async (req, res) => {
         console.error("❌ DB Auto-Save Failure Error:", err.message);
         res.status(500).json({ error: "Failed to record parameters." });
     }
-});
+});*/
 
 module.exports = app;

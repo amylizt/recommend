@@ -361,9 +361,9 @@ async function sendVerificationEmail(targetEmail, pinCode) {
 }
 
 async function doVerify(session, structuralDigits) {
-    /*if (structuralDigits && structuralDigits === session.authCode) {*/
+    if (structuralDigits && structuralDigits === session.authCode) {
         session.isAuthenticated = true;
-        /*const welcomeMessage = await handleSuccessfulVerification(session);*/
+        const welcomeMessage = await handleSuccessfulVerification(session);
         const deviceMessageText = PromptMatrix.find(p => p.id === 'deviceMessageText').build(session);
         const deviceMessage = await callAI( session.history, deviceMessageText);
         return {
@@ -372,7 +372,7 @@ async function doVerify(session, structuralDigits) {
 
         };
         
-    /*} else if (/^\d{6}$/.test(structuralDigits)) {
+    } else if (/^\d{6}$/.test(structuralDigits)) {
         return { 
             reply: "That verification code doesn't match what I generated. Could you please double-check your code?",
             associatedEmail: null
@@ -382,7 +382,7 @@ async function doVerify(session, structuralDigits) {
             reply: `We're waiting for the 6-digit verification code sent to ${session.authEmail}. Please enter it to continue, or provide a different email address.`,
             associatedEmail: null
         };
-    }*/
+    }
    
 }
 
@@ -462,18 +462,27 @@ async function formatBooks( cleanedText, res, session ){
                     .replace(/\s+/g, " ")    
                     .trim();
         };
+        
         for (const book of cleanedBooks) {
-            const coverUrl = await getCoverUrl( book);
+            const coverUrl = await getCoverUrl(book);
             const googleUrl = `https://www.google.com/search?q=${encodeURIComponent(`${book.author} ${book.cleanTitle} book amazon and barnes and noble`)}`;
             try {
-            await db.query(
-                `INSERT INTO recommendations (user_id, book_title, author, image_url, google_url, status)
-                 VALUES ($1, $2, $3, $4, $5, $6)`,
-                [session.userId, book.originalTitle, book.author, coverUrl, googleUrl, 'active']
-            );
-                console.log(`💾 Saved "${book.originalTitle}" to database profile.`);
+                const duplicateCheck = await db.query(
+                    `SELECT id FROM recommendations 
+                     WHERE user_id = $1 
+                       AND LOWER(REGEXP_REPLACE(book_title, '[^\\w\\s]', '', 'g')) = $2
+                       AND LOWER(REGEXP_REPLACE(author, '[^\\w\\s]', '', 'g')) = $3`,
+                    [session.userId, normalize(book.originalTitle), normalize(book.author)]
+                );
+                if (duplicateCheck.rows.length === 0) {
+                    await db.query(
+                        `INSERT INTO recommendations (user_id, book_title, author, image_url, google_url, status)
+                         VALUES ($1, $2, $3, $4, $5, $6)`,
+                        [session.userId, book.originalTitle, book.author, coverUrl, googleUrl, 'active']
+                    );
+                }
             } catch (dbErr) {
-                console.error("❌ Failed to save recommendation to DB:", dbErr.message);
+                console.error("❌ Failed to process recommendation check/save:", dbErr.message);
             }
             enrichedBooks.push({
                 title: book.originalTitle,
@@ -497,7 +506,6 @@ async function formatBooks( cleanedText, res, session ){
             books: enrichedBooks,
             associatedEmail: session.authEmail 
         });
-
 }
 async function getCoverUrl(book) {
     const normalize = (str) => { return (str || "").toLowerCase().replace(/[^\w\s]/g, "").replace(/\s+/g, " ").trim(); };

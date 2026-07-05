@@ -8,6 +8,7 @@ const chatSessions = {};
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 const resend = new Resend(process.env.RESEND_API_KEY);
 const app = express();
+const crypto = require('crypto');
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -28,6 +29,17 @@ const PromptMatrix = [
             return hasRecs
                 ? `[SYSTEM: User successfully entered verification code. This is an EXISTING returning account. Historical recommendations already stored in their profile are: ${session.excludedBooks.join(', ')}. YOU MUST NEVER RECOMMEND THESE TITLES AGAIN IN THIS SESSION. Welcome them back warmly and ask what they are in the mood to read today.]`
                 : `[SYSTEM: User successfully entered verification code. This is a BRAND NEW account. Welcome them to the platform for the first time, and ask what genres or authors they love.]`;
+        }
+    },
+    {
+        id: 'deviceMessageText',
+        build: (session) => {
+            return `
+                [SYSTEM: Explicitly thank the user for verifying their code and confirm they are authenticated.
+                Next, ask them clearly if they would like to save/remember this device so they can skip logging in next time.
+                
+                CRITICAL DIRECTIVE: You must ONLY ask this question. Do NOT welcome them to the platform, do NOT mention book recommendations, and do NOT ask what they want to read. 
+                Stop talking immediately after asking about the device permission so the user has space to answer 'yes' or 'no'.]`;
         }
     },
         {
@@ -107,7 +119,6 @@ async function setupDB (){
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         `);
-
         await db.query(`
             CREATE TABLE IF NOT EXISTS recommendations (
                 id SERIAL PRIMARY KEY,
@@ -131,9 +142,19 @@ async function setupDB (){
                 UNIQUE(normalized_title, normalized_author)
             );
         `);
-        console.log("💾 PostgreSQL Database initialized cleanly via pure JS app layer.");
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS user_device_tokens (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+                device_token TEXT UNIQUE NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP NOT NULL
+            );
+        `);
+
+        console.log("setupDB() db established.");
     } catch (error) {
-        console.error("❌ Database initialization failed:", error.message);
+        console.error("❌ db setup failed:", error.message);
     }
 }
 
@@ -165,7 +186,7 @@ CHAT NOTES
 
 //Create Session
 function createSession() {
-    console.log(`🆕 Generating fresh session payload parameters.`);
+    console.log(`CreateSession() session established`);
     return { 
         history: [
             { role: "model", parts: [{ text: "Say hello and let's discuss books!" }] }
@@ -174,9 +195,67 @@ function createSession() {
         authCode: null,
         isAuthenticated: false,
         userId: null,
-        excludedBooks: []
+        excludedBooks: [],
+        deviceTokenAccept: false,
+        deviceToken: null
     };
 }
+
+//handle Tokens
+async function createDeviceToken(session, cleanMessage) {
+    let token;
+    if( cleanMessage === "yes"){
+        token = crypto.randomBytes(32).toString('hex');
+        const expiration = new Date();
+        expiration.setDate(expiration.getDate() + 30);
+        session.deviceToken = token;
+        session.deviceTokenAccept = "yes";
+        await createUser(session.userId, session.authEmail);
+        await db.query(
+            `INSERT INTO user_device_tokens (user_id, device_token, expires_at) 
+            VALUES ($1, $2, $3)`,
+            [session.userId, token, expiration]
+        );
+    } else {
+        session.deviceToken = null;
+        session.deviceTokenAccept = "no"
+    }
+    const welcomeMessage = await handleSuccessfulVerification(session);
+    return {
+        reply: welcomeMessage,
+        associatedEmail: session.authEmail,
+        deviceToken: token
+    };
+}
+
+
+async function verifyDeviceToken(session, token) {
+    try {
+        const result = await db.query(
+            `SELECT user_id, email FROM user_device_tokens t
+             JOIN users u ON t.user_id = u.id
+             WHERE t.device_token = $1 AND t.expires_at > CURRENT_TIMESTAMP`,
+            [token]
+        );
+        
+        if (result.rows.length > 0) {
+            const row = result.rows[0];
+
+            session.userId = row.user_id;
+            session.authEmail = row.email;
+            session.isAuthenticated = true;
+            session.deviceToken = token;
+            session.deviceTokenAccept = "yes";
+            
+            return row; 
+        }
+        return null;
+    } catch (err) {
+        console.error("Device token issue:", err.message);
+        return null;
+    }
+}
+
 //AI Call
 
 async function callAI(history, systemPrompt) {
@@ -185,7 +264,7 @@ async function callAI(history, systemPrompt) {
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        console.log(`🤖 Requesting Gemini generation (Attempt ${attempt}/${maxRetries})...`);
+        console.log(`AI call: (Attempt ${attempt}/${maxRetries})...`);
         try {
             const response = await ai.models.generateContent({
                 model: "gemini-3.1-flash-lite", 
@@ -232,7 +311,6 @@ async function handleEmailAddress(session, detectedEmail, res) {
 }
 
 async function initEmailReg(emailTarget) {
-    console.log("initEmailReg")
     let userId;
     try {
         const result = await db.query(`SELECT id FROM users WHERE LOWER(email) = $1`, [emailTarget]);
@@ -274,7 +352,7 @@ async function sendVerificationEmail(targetEmail, pinCode) {
             console.error(`❌ Resend Delivery Error to ${targetEmail}:`, error.message);
             return false;
         }
-        console.log(`✉️ Mail successfully dispatched via Resend API to ${targetEmail}. ID: ${data.id}`);
+        console.log(`Mail sent to: ${targetEmail}. ID: ${data.id}`);
         return true;
     } catch (err) {
         console.error(`❌ Unexpected processing breakdown during mail dispatch:`, err.message);
@@ -283,16 +361,18 @@ async function sendVerificationEmail(targetEmail, pinCode) {
 }
 
 async function doVerify(session, structuralDigits) {
-    console.log("doVerify")
-    if (structuralDigits && structuralDigits === session.authCode) {
+    /*if (structuralDigits && structuralDigits === session.authCode) {*/
         session.isAuthenticated = true;
-        const welcomeMessage = await handleSuccessfulVerification(session);     
+        /*const welcomeMessage = await handleSuccessfulVerification(session);*/
+        const deviceMessageText = PromptMatrix.find(p => p.id === 'deviceMessageText').build(session);
+        const deviceMessage = await callAI( session.history, deviceMessageText);
         return {
-            reply: welcomeMessage,
-            associatedEmail: session.authEmail
+            reply: deviceMessage.text,
+            associatedEmail: session.authEmail,
+
         };
         
-    } else if (/^\d{6}$/.test(structuralDigits)) {
+    /*} else if (/^\d{6}$/.test(structuralDigits)) {
         return { 
             reply: "That verification code doesn't match what I generated. Could you please double-check your code?",
             associatedEmail: null
@@ -302,14 +382,14 @@ async function doVerify(session, structuralDigits) {
             reply: `We're waiting for the 6-digit verification code sent to ${session.authEmail}. Please enter it to continue, or provide a different email address.`,
             associatedEmail: null
         };
-    }
+    }*/
    
 }
 
 async function handleSuccessfulVerification(session) {
-    console.log("handleSuccessfulVerification")
     try {
         await createUser(session.userId, session.authEmail);
+        
         const activeRecs = await retrieveBooks(session.userId);
         if (activeRecs && activeRecs.length > 0) {
             session.excludedBooks = activeRecs.map(b => `"${b.book_title}" by ${b.author}`);
@@ -333,7 +413,6 @@ async function handleSuccessfulVerification(session) {
     return aiResponse.text;
 }
 async function doIntro(session){
-    console.log("doIntro")
     const welcomePrePrompt = PromptMatrix.find(p => p.id === 'welcomePreAuthenticated').build(session);
     try {
         const response = await callAI(session.history, welcomePrePrompt);
@@ -385,12 +464,23 @@ async function formatBooks( cleanedText, res, session ){
         };
         for (const book of cleanedBooks) {
             const coverUrl = await getCoverUrl( book);
+            const googleUrl = `https://www.google.com/search?q=${encodeURIComponent(`${book.author} ${book.cleanTitle} book amazon and barnes and noble`)}`;
+            try {
+            await db.query(
+                `INSERT INTO recommendations (user_id, book_title, author, image_url, google_url, status)
+                 VALUES ($1, $2, $3, $4, $5, $6)`,
+                [session.userId, book.originalTitle, book.author, coverUrl, googleUrl, 'active']
+            );
+                console.log(`💾 Saved "${book.originalTitle}" to database profile.`);
+            } catch (dbErr) {
+                console.error("❌ Failed to save recommendation to DB:", dbErr.message);
+            }
             enrichedBooks.push({
                 title: book.originalTitle,
                 author: book.author,
                 reason: book.reason,
                 imageUrl: coverUrl, 
-                googleUrl: `https://www.google.com/search?q=${encodeURIComponent(`${book.author} ${book.cleanTitle} book amazon and barnes and noble`)}` 
+                googleUrl: googleUrl
             });
         }
         const savedExclusions = [...session.excludedBooks, ...cleanedBooks.map(b => `"${b.originalTitle}" by ${b.author}`)];
@@ -409,42 +499,39 @@ async function formatBooks( cleanedText, res, session ){
         });
 
 }
-
-async function getCoverUrl( book) {
-    const normalize = (str) => {return (str || "").toLowerCase().replace(/[^\w\s]/g, "").replace(/\s+/g, " ").trim();};
+async function getCoverUrl(book) {
+    const normalize = (str) => { return (str || "").toLowerCase().replace(/[^\w\s]/g, "").replace(/\s+/g, " ").trim(); };
     const cacheCheck = await db.query(
         `SELECT cover_url FROM open_library_cache 
         WHERE normalized_title = $1 AND normalized_author = $2`,
         [normalize(book.cleanTitle), normalize(book.author)]
     );
-    if (cacheCheck.rows.length > 0) {return cacheCheck.rows[0].cover_url;  }
-    let coverUrl = "https://via.placeholder.com/120x180?text=No+Cover";
+    if (cacheCheck.rows.length > 0) { return cacheCheck.rows[0].cover_url; }
+    
+    let coverUrl = null;
     const searchUrl = `https://openlibrary.org/search.json?q=${encodeURIComponent(book.cleanTitle + ' ' + book.author)}&fields=title,author_name,cover_i&limit=5`;
-    const headers = new Headers({"User-Agent": "SnookBook/1.0 (amylizt@gmail.com)" });
-    const options = {method: 'GET', headers: headers, signal: AbortSignal.timeout(4000)};
-    if( !coverUrl === "https://via.placeholder.com/120x180?text=No+Cover"){
-        await db.query(
-            `INSERT INTO open_library_cache (normalized_title, normalized_author, cover_url)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (normalized_title, normalized_author) DO NOTHING`,
-            [normalize(book.cleanTitle), normalize(book.author), coverUrl]
-        );
-    }
+    const headers = new Headers({ "User-Agent": "SnookBook/1.0 (amylizt@gmail.com)" });
+    const options = { method: 'GET', headers: headers, signal: AbortSignal.timeout(4000) };
     try {
         const apiRes = await fetch(searchUrl, options).then(res => res.json());
         const matchedDoc = (apiRes.docs || []).find(d => d.cover_i);
-        if (matchedDoc) { coverUrl = `https://covers.openlibrary.org/b/id/${matchedDoc.cover_i}-M.jpg`;}
+        if (matchedDoc) { 
+            coverUrl = `https://covers.openlibrary.org/b/id/${matchedDoc.cover_i}-M.jpg`;
+            await db.query(
+                `INSERT INTO open_library_cache (normalized_title, normalized_author, cover_url)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (normalized_title, normalized_author) DO NOTHING`,
+                [normalize(book.cleanTitle), normalize(book.author), coverUrl]
+            );
+        }
         const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
         await sleep(400);
-
     } catch (apiErr) {
         console.error(`⚠️ Cover metadata lookup failed for ${book.cleanTitle}:`, apiErr.message);
     }
-
-    if (coverUrl === "https://via.placeholder.com/120x180?text=No+Cover") {
+    if (!coverUrl) {
         const title = book.originalTitle || book.cleanTitle;
         const displayTitle = title.length > 50 ? title.substring(0, 47) + '...' : title;
-        
         coverUrl = `data:image/svg+xml;utf8,${encodeURIComponent(`
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 180" width="120" height="180">
             <rect width="120" height="180" fill="#555555" rx="2" />
@@ -463,20 +550,24 @@ async function getCoverUrl( book) {
 
 //api
 app.post('/api/chat', async (req, res) => {
-    const { sessionId, message } = req.body;
+    const { sessionId, message, deviceToken } = req.body;
     const cleanMessage = message ? message.trim() : ""; 
     const structuralDigits = cleanMessage.replace(/\D/g, "");
     if (!sessionId) { return res.status(400).json({ error: "A unique sessionId is required." });  }
     if (!chatSessions[sessionId]) { chatSessions[sessionId] = createSession(); }
     const session = chatSessions[sessionId];
     session.sessionId = sessionId;
-    const isVerifying = session.authEmail && !session.isAuthenticated;
+    if (deviceToken && !session.isAuthenticated) {await verifyDeviceToken(session, deviceToken);}
+    const deviceResolved = (session.deviceToken !== null) || (session.deviceTokenAccept === "no");
+    const isVerifying = session.authEmail && !session.isAuthenticated && !deviceToken;
     const detectedEmail = message.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-    const isRegisteringEmail = detectedEmail && !session.authEmail;
-    const isNewUser = !session.isAuthenticated && !session.authEmail;
-    const isAuthenticatedUser = session.isAuthenticated === true;
+    const isRegisteringEmail = detectedEmail && !session.authEmail && !deviceToken;
+    const isNewUser = !session.isAuthenticated && !session.authEmail && !deviceToken;
+    const isSaveDevice = cleanMessage === "yes" || cleanMessage === "no" && !session.deviceToken;
+    const isAuthenticatedUser = session.isAuthenticated === true && deviceResolved;
     if (session.history[session.history.length - 1].role !== "user") {session.history.push({ role: "user", parts: [{ text: cleanMessage }] }); }
     switch (true) {
+        case isSaveDevice: return res.json(await createDeviceToken(session, cleanMessage));
         case isRegisteringEmail: return await handleEmailAddress(session, detectedEmail, res);
         case isVerifying: {return res.json(await doVerify(session, structuralDigits));}
         case isNewUser: return res.json(await doIntro(session));
@@ -513,7 +604,7 @@ app.post('/api/chat', async (req, res) => {
         res.status(500).json({ error: "Database update failure." });
     }
 });
-
+*/
 
 app.get('/api/recommendations/saved', async (req, res) => {
     const { email } = req.query;
@@ -533,8 +624,7 @@ app.get('/api/recommendations/saved', async (req, res) => {
         const savedBooks = await db.query(`
             SELECT book_title as title, author, 
             image_url AS "imageUrl",
-            google_url AS "googleUrl",
-            audible_url AS "audibleUrl"
+            google_url AS "googleUrl"
             FROM recommendations 
             WHERE user_id = $1 AND status = 'active'
             ORDER BY id DESC`, [userId]);
@@ -545,7 +635,7 @@ app.get('/api/recommendations/saved', async (req, res) => {
         res.status(500).json({ error: "Database retrieval failure." });
     }
 });
-
+/*
 
 app.post('/api/auth/register-and-save', async (req, res) => {
     const { email, authProvider, initialBooks } = req.body;

@@ -321,10 +321,10 @@
                     <span class="link-icon">📚</span>
                     <span>My Saved Books</span>
                 </a>
-                <a href="#" class="sidebar-link" onclick="alert('Account options coming soon!')">
+                <!--a href="#" class="sidebar-link" onclick="alert('Account options coming soon!')">
                     <span class="link-icon">⚙️</span>
                     <span>Preferences</span>
-                </a>
+                </a-->
                 <a href="#" class="sidebar-link" onclick="location.reload()">
                     <span class="link-icon">🗑️</span>
                     <span>Clear Session</span>
@@ -371,14 +371,10 @@ async function loadSavedBooks() {
     try {
         const res = await fetch(`/api/recommendations/saved?email=${encodeURIComponent(activeUserEmail)}`);
         const data = await res.json();
-
         if (data.success && data.books.length > 0) {
-            // Clear or prepare message window display container
             appendMessage("📋 Here are your currently saved books:", "ai");
-            
-            // Render the cards using our unified card structure builder
             data.books.forEach(book => {
-                renderBookCard(book.title, book.author);
+                renderBookCard(book.title, book.author, book.imageUrl, book.googleUrl);
             });
         } else {
             appendMessage("You don't have any active saved books right now.", "ai");
@@ -387,8 +383,99 @@ async function loadSavedBooks() {
         console.error("Error loading saved items list:", err);
     }
 }
+function renderBookCard(title, author, imageUrl, googleUrl) {
+    const card = document.createElement('div');
+    card.className = 'book-card';
+    card.style.border = '1px solid #ccc';
+    card.style.padding = '10px';
+    card.style.margin = '10px 0';
+    card.style.borderRadius = '8px';
+    card.style.backgroundColor = '#f9f9f9';
 
-function renderBookCard(title, author) {
+    // 🎯 If imageUrl is provided, render the split layout with the book cover (Saved View)
+    if (imageUrl) {
+        card.style.display = 'flex';
+        card.style.gap = '15px';
+        
+        card.innerHTML = `
+            <div class="book-cover-container" style="flex-shrink: 0;">
+                <img src="${imageUrl}" alt="${title} cover" style="width: 80px; height: 120px; object-fit: cover; border-radius: 4px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);" />
+            </div>
+
+            <div class="book-details" style="display: flex; flex-direction: column; justify-content: space-between; flex-grow: 1;">
+                <div>
+                    <strong>${title}</strong><br>
+                    <span style="color: #555;">Author: ${author}</span>
+                </div>
+                <div style="margin-top: 8px; display: flex; gap: 8px;">
+                    <button class="lookup-btn" style="background-color: #075e54; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; min-width: 85px; font-weight: normal;">
+                        Look Up
+                    </button>
+                    <button class="remove-btn" style="background-color: #d9534f; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; min-width: 85px; font-weight: normal;">
+                        Remove
+                    </button>
+                </div>
+            </div>
+        `;
+    } else {
+        // 🎯 Initial Live Recommendations Flow Layout (Stays exactly as it was)
+        card.innerHTML = `
+            <strong>${title}</strong><br>
+            <span style="color: #555;">Author: ${author}</span>
+            <div style="margin-top: 8px; display: flex; gap: 8px;">
+                <button class="lookup-btn" style="background-color: #075e54; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer;">
+                    Look Up
+                </button>
+                <button class="remove-btn" style="background-color: #d9534f; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer;">
+                    Remove
+                </button>
+            </div>
+        `;
+    }
+
+    // Look up action logic (Uses database googleUrl if provided, drops to dynamic query generation otherwise)
+    card.querySelector('.lookup-btn').addEventListener('click', () => {
+        if (googleUrl) {
+            window.open(googleUrl, '_blank');
+        } else {
+            const query = encodeURIComponent(`${title} ${author}`);
+            window.open(`https://www.google.com/search?q=${query}`, '_blank');
+        }
+    });
+
+    // Remove action logic remains intact
+    card.querySelector('.remove-btn').addEventListener('click', async () => {
+        if (!activeUserEmail) {
+            alert("No active user session detected to process removal.");
+            return;
+        }
+
+        try {
+            const res = await fetch('/api/recommendations/status', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    email: activeUserEmail,
+                    title: title,
+                    author: author,
+                    status: 'removed'
+                })
+            });
+            const updateResult = await res.json();
+            if (updateResult.success) {
+                card.style.transition = 'opacity 0.3s ease';
+                card.style.opacity = '0';
+                setTimeout(() => card.remove(), 300);
+            }
+        } catch (err) {
+            console.error("Network error trying to process book state change:", err);
+        }
+    });
+
+    // Append directly to chat log element
+    document.getElementById('chatMessages').appendChild(card); 
+}
+/*function renderBookCard(title, author) {
     const card = document.createElement('div');
     card.className = 'book-card'; // Use your layout styling configurations
     card.style.border = '1px solid #ccc';
@@ -448,7 +535,7 @@ function renderBookCard(title, author) {
 
     // Append your newly generated item directly to the chat log element
     document.getElementById('chatMessages').appendChild(card); 
-}
+}*/
 
         // Functions controlling layout side menu animation layers
         function openMenu() {
@@ -480,7 +567,7 @@ function renderBookCard(title, author) {
             chatMessages.scrollTop = chatMessages.scrollHeight;
         }
 
-        function appendBookRecommendations(booksArray) {
+        function appendBook(booksArray) {
             const wrapper = document.createElement('div');
             wrapper.style.display = 'flex';
             wrapper.style.flexDirection = 'column';
@@ -572,13 +659,17 @@ async function handleSendMessage() {
     appendMessage(text, 'user');
     userInput.value = '';
 
+    // 1. PULL TOKEN: Check if a device token was previously saved in this browser
+    const savedDeviceToken = localStorage.getItem('snookbook_device_token');
+
     try {
         const response = await fetch('/api/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ 
                 sessionId: uniqueSessionId, 
-                message: text 
+                message: text,
+                deviceToken: savedDeviceToken // <-- Include the token in the payload
             })
         });
         
@@ -588,51 +679,27 @@ async function handleSendMessage() {
             appendMessage(data.reply, 'ai');
         }
 
-        // 2. SESSION SYSTEM LAYER: Lock in the email session if returned
+        // 2. SAVE TOKEN: If the server generated a device token post-PIN verification, lock it into storage
+        if (data.deviceToken) {
+            localStorage.setItem('snookbook_device_token', data.deviceToken);
+            console.log("📱 Device token securely saved to local storage.");
+        }
+
+        // SESSION SYSTEM LAYER: Lock in the email session if returned
         if (data.associatedEmail) {
             activeUserEmail = data.associatedEmail;
             console.log("🎯 Active user session armed globally for:", activeUserEmail);
         }
 
-        // 3. RECOMMENDATIONS DISPLAY & DB SAVE LAYER
+        // RECOMMENDATIONS DISPLAY LAYER
         if (data.isRecommendation && Array.isArray(data.books)) {
             appendBookRecommendations(data.books);
-
-            // If an email is bound to these books, sync them right into Postgres
-            if (data.associatedEmail) {
-                console.log(`💾 Auto-saving recommendations to database profile for: ${data.associatedEmail}`);
-
-                fetch('/api/auth/register-and-save', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        email: data.associatedEmail,
-                        authProvider: 'email_code',
-                        initialBooks: data.books 
-                    })
-                })
-                .then(res => res.json())
-                .then(savedState => {
-                    if (savedState.success) {
-                        console.log("✅ Database sync complete:", savedState.message);
-                        setTimeout(() => {
-                            appendMessage("🔄 Your reading list is saved! Let me know when you're ready to look for something else.", "ai");
-                        }, 2000);
-                    } else {
-                        console.error("⚠️ Server processed request but database return was unsuccessful:", savedState.error);
-                    }
-                })
-                .catch(err => {
-                    console.error("❌ Network failure trying to sync recommendations table:", err);
-                });
-            }
+            // Note: The backend handles database tracking directly now during the chat cycle!
         } else if (!data.reply) {
-            // Fallback safety string if the backend sends absolute empty parameters
             appendMessage('Sorry, I encountered an issue handling the response sequence.', 'ai');
         }
 
     } catch (error) {
-        if (loadingBubble) loadingBubble.remove();
         console.error('Error contacting backend:', error);
         appendMessage('Error: Unable to reach the server.', 'ai');
     }
@@ -641,6 +708,39 @@ async function handleSendMessage() {
         userInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') handleSendMessage();
         });
+        document.addEventListener('DOMContentLoaded', () => {
+    const savedDeviceToken = localStorage.getItem('snookbook_device_token');
+    
+    if (savedDeviceToken) {
+        console.log("📱 Found a saved device token. Re-authenticating session smoothly...");
+        
+        // Quietly notify the backend to verify the token and bootstrap the user state
+        fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+                sessionId: uniqueSessionId, 
+                message: "", // Empty or greeting message just to trigger the route
+                deviceToken: savedDeviceToken 
+            })
+        })
+        .then(res => res.json())
+        .then(data => {
+            if (data.associatedEmail) {
+                activeUserEmail = data.associatedEmail;
+                console.log("🎯 Device re-authenticated successfully for:", activeUserEmail);
+            }
+            
+            // If the server returns a greeting or catch-up message, display it
+            if (data.reply) {
+                appendMessage(data.reply, 'ai');
+            }
+        })
+        .catch(err => {
+            console.error("❌ Failed silent device verification on startup:", err);
+        });
+    }
+});
     </script>
 </body>
 </html>

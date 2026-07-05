@@ -433,7 +433,6 @@ async function handleBookChat(session, res) {
         session.history.push({ role: "model", parts: [{ text: replyText }] });
         let cleanedText = replyText.replace(/```json|```/g, "").trim();
         const isJson = (cleanedText.startsWith('[') && cleanedText.endsWith(']'));
-
         if (isJson) {
             return await formatBooks(cleanedText, res, session);
         } else {
@@ -491,15 +490,13 @@ async function formatBooks( cleanedText, res, session ){
                 googleUrl: googleUrl
             });
         }
+        
+        
         const savedExclusions = [...session.excludedBooks, ...cleanedBooks.map(b => `"${b.originalTitle}" by ${b.author}`)];
-        chatSessions[session.sessionId] = {
-            history: [{ role: "model", parts: [{ text: "Let's find some more books!" }] }],
-            authEmail: session.authEmail,
-            authCode: null,
-            isAuthenticated: true,
-            userId: session.userId,
-            excludedBooks: savedExclusions
-        };
+        session.history = [{ role: "model", parts: [{ text: "Let's find some more books!" }] }];
+        session.authCode = null;
+        session.excludedBooks = savedExclusions;
+        console.log("formatBooks",session)
         return res.json({ 
             isRecommendation: true, 
             books: enrichedBooks,
@@ -573,7 +570,6 @@ app.post('/api/chat', async (req, res) => {
     const isSaveDevice = cleanMessage === "yes" || cleanMessage === "no" && !session.deviceToken;
     const isAuthenticatedUser = session.isAuthenticated === true && deviceResolved;
     if (session.history[session.history.length - 1].role !== "user") {session.history.push({ role: "user", parts: [{ text: cleanMessage }] }); }
-    console.log("case", isSaveDevice, isRegisteringEmail,isVerifying, isNewUser, isAuthenticatedUser);
     switch (true) {
         case isSaveDevice: return res.json(await createDeviceToken(session, cleanMessage));
         case isRegisteringEmail: return await handleEmailAddress(session, detectedEmail, res);

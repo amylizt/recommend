@@ -363,7 +363,6 @@ async function sendVerificationEmail(targetEmail, pinCode) {
 async function doVerify(session, structuralDigits) {
     if (structuralDigits && structuralDigits === session.authCode) {
         session.isAuthenticated = true;
-        const welcomeMessage = await handleSuccessfulVerification(session);
         const deviceMessageText = PromptMatrix.find(p => p.id === 'deviceMessageText').build(session);
         const deviceMessage = await callAI( session.history, deviceMessageText);
         return {
@@ -389,7 +388,7 @@ async function doVerify(session, structuralDigits) {
 async function handleSuccessfulVerification(session) {
     try {
         await createUser(session.userId, session.authEmail);
-        
+        console.log("handle")
         const activeRecs = await retrieveBooks(session.userId);
         if (activeRecs && activeRecs.length > 0) {
             session.excludedBooks = activeRecs.map(b => `"${b.book_title}" by ${b.author}`);
@@ -574,6 +573,7 @@ app.post('/api/chat', async (req, res) => {
     const isSaveDevice = cleanMessage === "yes" || cleanMessage === "no" && !session.deviceToken;
     const isAuthenticatedUser = session.isAuthenticated === true && deviceResolved;
     if (session.history[session.history.length - 1].role !== "user") {session.history.push({ role: "user", parts: [{ text: cleanMessage }] }); }
+    console.log("case", isSaveDevice, isRegisteringEmail,isVerifying, isNewUser, isAuthenticatedUser);
     switch (true) {
         case isSaveDevice: return res.json(await createDeviceToken(session, cleanMessage));
         case isRegisteringEmail: return await handleEmailAddress(session, detectedEmail, res);
